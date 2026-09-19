@@ -1,0 +1,6 @@
+hidapi
+PySide6
+pystray
+Pillow
+platformdirs
+pynput
