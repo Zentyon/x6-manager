@@ -1,6 +1,9 @@
-hidapi
-PySide6
-pystray
-Pillow
-platformdirs
-pynput
+# nucleo (obligatorio)
+hidapi>=0.14            # modulo `hid`, canal vendor del dongle 1d57:fa60
+platformdirs>=4.0       # perfiles en el directorio de configuracion del SO
+pynput>=1.7.5           # captura/inyeccion de botones y teclas (capas G-Shift, macros)
+pystray>=0.19           # bandeja del sistema
+Pillow>=10.0            # icono de la bandeja
+
+# UI opcional (python -m app --ui)
+PySide6>=6.6

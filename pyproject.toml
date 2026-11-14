@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x6-manager"
+version = "0.2.0"
+description = "Manager para el mouse Attack Shark X6: DPI onboard, perfiles, capas tipo G-Shift y macros"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "hidapi>=0.14",
+    "platformdirs>=4.0",
+    "pynput>=1.7.5",
+    "pystray>=0.19",
+    "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+ui = ["PySide6>=6.6"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+x6-manager = "app.__main__:main"
+
+[tool.setuptools]
+packages = ["app", "x6core", "x6core.backends"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

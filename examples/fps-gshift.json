@@ -1,0 +1,37 @@
+{
+  "name": "FPS",
+  "version": 1,
+  "dpi_stages": [800, 1600, 3200, 5600],
+  "dpi_colors": [255, 65280, 16711680, 16776960],
+  "active_stage": 0,
+  "polling": 1000,
+  "lod": "1mm",
+  "debounce_ms": 4,
+  "angle_snap": false,
+  "motion_sync": true,
+  "sleep_min": 10,
+  "buttons": {
+    "left": "left",
+    "right": "right",
+    "middle": "middle",
+    "backward": "backward",
+    "dpi": "dpi_cycle"
+  },
+  "layers": {
+    "shift": {
+      "backward": "ctrl+c",
+      "middle": { "kind": "media", "value": "mute", "macro_id": "" },
+      "left": "left"
+    }
+  },
+  "shift_button": "forward",
+  "shift_layer": "shift",
+  "shift_mode": "hold",
+  "macros": {
+    "spray": [
+      { "key": "ctrl+f", "down_ms": 40, "delay_ms": 120 },
+      { "key": "esc", "down_ms": 40, "delay_ms": 0 }
+    ]
+  },
+  "auto_apps": []
+}
