@@ -19,8 +19,19 @@ from .actions import ActionExecutor
 from .backends import make_backend
 from .inject import is_injecting
 from .layers import LayerEngine, Step
+from .profiles import KEY_TRIGGERS
 
 log = logging.getLogger(__name__)
+
+
+def key_triggers_for(profile) -> tuple[str, ...]:
+    """Teclas que el hook debe vigilar: solo si `shift_button` es una tecla.
+
+    Si el disparador es un boton del mouse no se escucha el teclado, para no
+    procesar cada pulsacion del usuario.
+    """
+    shift = profile.shift_button
+    return (shift,) if shift in KEY_TRIGGERS else ()
 
 
 class _StepWorker(threading.Thread):
@@ -51,12 +62,18 @@ class HostInput:
     def __init__(self, daemon, *, dry_run: bool = False,
                  side_button_map: dict[str, str] | None = None,
                  swap_side_buttons: bool = False,
-                 hotkeys: bool = True):
+                 hotkeys: bool = True,
+                 on_button=None):
         self._daemon = daemon
         self._hotkeys_enabled = hotkeys
+        self._on_button = on_button
         self.engine = LayerEngine(daemon.profile, side_button_map=side_button_map)
         self.executor = ActionExecutor(daemon, dry_run=dry_run)
-        self.backend = make_backend(self._handle, swap_side_buttons=swap_side_buttons)
+        self.backend = make_backend(
+            self._handle,
+            swap_side_buttons=swap_side_buttons,
+            key_triggers=key_triggers_for(daemon.profile),
+        )
         self._worker = _StepWorker(self.executor)
         self._hotkeys = None
         self._switch_lock = threading.Lock()
@@ -68,6 +85,14 @@ class HostInput:
         if is_injecting():
             return False
         result = self.engine.handle(button, pressed)
+        log.debug("boton %s %s -> suppress=%s capa=%s pasos=%s", button,
+                  "DOWN" if pressed else "UP", result.suppress, self.engine.layer,
+                  [f"{s.kind}:{s.value}" for s in result.steps] or "-")
+        if self._on_button is not None:
+            try:
+                self._on_button(button, pressed, result, self.engine.layer)
+            except Exception:
+                log.exception("on_button fallo (no debe romper el hook)")
         if result.steps:
             self._worker.submit(result.steps)
         return result.suppress
@@ -77,6 +102,9 @@ class HostInput:
             return
         self.executor.release_all()
         self.engine.set_profile(self._daemon.profile)
+        set_triggers = getattr(self.backend, "set_key_triggers", None)
+        if set_triggers is not None:
+            set_triggers(key_triggers_for(self._daemon.profile))
         if event == "switch":
             self._warn_if_not_suppressible()
 

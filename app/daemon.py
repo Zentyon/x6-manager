@@ -73,7 +73,7 @@ class Daemon:
         with self._lock:
             if self._dongle is None or self._dongle.closed:
                 self._dongle = transport.Dongle.open()
-                log.info("dongle abierto en %s", self._dongle.info.get("path"))
+                log.info("dongle abierto en %s", transport.display_path(self._dongle.info))
             return self._dongle
 
     def _drop_dongle(self) -> None:
@@ -82,12 +82,14 @@ class Daemon:
                 self._dongle.close()
             self._dongle = None
 
-    def _apply(self, profile: Profile) -> None:
+    def _apply(self, profile: Profile) -> bool:
         payload = profile.onboard_payload()
         if self.dry_run:
             log.info("[dry-run] aplicaria %d bytes a %s", len(payload), profile.name)
-            return
-        self.ensure_open().apply_onboard(payload)
+            return True
+        acked = self.ensure_open().apply_onboard(payload)
+        log.debug("payload 0x04 aplicado (%s)", "con ACK" if acked else "sin ACK")
+        return acked
 
     def switch(self, name: str) -> bool:
         with self._lock:
@@ -151,32 +153,39 @@ class Daemon:
 
     def _on_status(self, status: dict) -> None:
         kind = status.get("type")
-        if kind == "heartbeat":
-            battery = status.get("battery")
-            if battery is not None:
-                self._emit("battery", percent=battery, raw=status.get("battery_raw"))
-        elif kind == "dpi_button":
-            index = status.get("stage_index")
-            # el boton DPI tambien puede ser el trigger de una capa (shift_mode=toggle)
-            self._emit("dpi_button", stage=index, raw=status.get("raw"))
-            if index is None:
-                log.debug("evento DPI con stage desconocido: %s", status.get("raw"))
+        if kind not in ("status", "dpi"):
+            return  # ack/unknown: nada que hacer
+        raw = status.get("battery_raw")
+        battery = status.get("battery")
+        if battery is None:
+            log.debug("bateria fuera de rango (raw=%s), ignorada", raw)
+        else:
+            self._emit("battery", percent=battery, raw=raw,
+                       profile=status.get("profile"))
+        if kind != "dpi":
+            return
+        # El boton DPI fisico no genera evento de raton: solo este aviso, sin
+        # release. Puede ser el shift de una capa en modo toggle.
+        stage = status.get("stage")
+        self._emit("dpi_button", stage=stage, raw=status.get("raw"))
+        index = stage - 1 if isinstance(stage, int) and 1 <= stage <= 8 else None
+        if index is None:
+            log.debug("evento DPI con stage desconocido: %s", status.get("raw"))
+            return
+        with self._lock:
+            profile = self.profile
+            if index >= len(profile.dpi_stages):
+                log.debug("stage fisico %s fuera del perfil (%d stages)",
+                          stage, len(profile.dpi_stages))
                 return
-            with self._lock:
-                profile = self.profile
-                if index >= len(profile.dpi_stages):
-                    log.debug("stage fisico %s fuera del perfil (%d stages)",
-                              index + 1, len(profile.dpi_stages))
-                    return
-                if profile.active_stage != index:
-                    profile.active_stage = index
-                    try:
-                        profile.save(profiles_dir() / f"{self.active}.json")
-                    except Exception:
-                        log.exception("no se pudo guardar el stage fisico")
-            self._emit("stage", name=self.active, stage=index,
-                       dpi=profile.dpi_stages[index], source="hardware")
-        # ack / unknown: no hay nada que hacer
+            if profile.active_stage != index:
+                profile.active_stage = index
+                try:
+                    profile.save(profiles_dir() / f"{self.active}.json")
+                except Exception:
+                    log.exception("no se pudo guardar el stage fisico")
+        self._emit("stage", name=self.active, stage=index,
+                   dpi=profile.dpi_stages[index], source="hardware")
 
     # -- eventos -----------------------------------------------------------
     def subscribe(self, callback) -> None:

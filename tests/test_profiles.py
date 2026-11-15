@@ -21,7 +21,7 @@ class ProfileTest(unittest.TestCase):
         profile = Profile()
         profile.validate()
         payload = profile.onboard_payload()
-        self.assertEqual(len(payload), 52)
+        self.assertEqual(len(payload), 56)
         self.assertEqual(payload[0], 0x04)
 
     def test_roundtrip_con_capa(self):
@@ -89,6 +89,21 @@ class ProfileTest(unittest.TestCase):
         profile.active_stage = len(profile.dpi_stages)
         with self.assertRaises(ProfileError):
             profile.validate()
+
+    def test_shift_con_tecla_que_el_mouse_puede_emitir(self):
+        profile = Profile()
+        profile.shift_button = "9"
+        profile.layers = {"shift": {"backward": ButtonAction("shortcut", "ctrl+c")}}
+        profile.validate()
+
+    def test_shift_con_tecla_fuera_del_rango_del_firmware(self):
+        # F13 y Scroll Lock no llegan al SO: el teclado del dongle acaba en 0x2F
+        for name in ("f13", "scroll_lock", "pause"):
+            profile = Profile()
+            profile.shift_button = name
+            profile.layers = {"shift": {"backward": ButtonAction("shortcut", "ctrl+c")}}
+            with self.assertRaises(ProfileError, msg=name):
+                profile.validate()
 
     def test_shift_sin_capa(self):
         profile = Profile()

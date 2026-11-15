@@ -1,0 +1,12 @@
+LIBRARY HID
+EXPORTS
+    HidD_GetAttributes
+    HidD_GetFeature
+    HidD_GetHidGuid
+    HidD_GetInputReport
+    HidD_GetPreparsedData
+    HidD_FreePreparsedData
+    HidD_SetFeature
+    HidD_SetNumInputBuffers
+    HidD_SetOutputReport
+    HidP_GetCaps

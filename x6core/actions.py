@@ -117,6 +117,8 @@ class ActionExecutor:
 
     def execute(self, step) -> None:
         kind, value = step.kind, step.value
+        if kind not in ("click_down", "click_up"):
+            log.debug("ejecutando %s %s", kind, value)
         if self.dry_run or kind in ("dpi_cycle", "dpi_up", "dpi_down"):
             handler = getattr(self, f"_do_{kind}", None)
             if handler is not None:

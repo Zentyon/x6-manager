@@ -118,6 +118,44 @@ class ShiftLayerTest(unittest.TestCase):
         self.assertEqual(result.steps, ())
 
 
+class KeyboardShiftTest(unittest.TestCase):
+    """Un boton de arriba remapeado a una tecla dispara la capa desde el hook.
+
+    El firmware del X6 solo emite usages 0x00-0x2F (letras/digitos), asi que la
+    tecla disparadora tiene que estar en ese rango.
+    """
+
+    def setUp(self):
+        self.profile = make_profile(shift_button="9", shift_layer="shift",
+                                    shift_mode="hold")
+        self.profile.layers = {"shift": {
+            "backward": ButtonAction("shortcut", "ctrl+c"),
+            "middle": ButtonAction("media", "mute"),
+            "0": ButtonAction("shortcut", "ctrl+v"),
+        }}
+        self.engine = LayerEngine(self.profile)
+
+    def test_tecla_activa_la_capa_y_se_bloquea(self):
+        down = self.engine.handle("9", True)
+        self.assertTrue(down.suppress)
+        self.assertEqual(self.engine.layer, "shift")
+        up = self.engine.handle("9", False)
+        self.assertTrue(up.suppress)
+        self.assertIsNone(self.engine.layer)
+
+    def test_tecla_que_no_es_el_shift(self):
+        self.assertFalse(self.engine.handle("0", True).suppress)
+        self.assertIsNone(self.engine.layer)
+
+    def test_accion_de_capa_con_el_shift_pulsado(self):
+        self.engine.handle("9", True)
+        down = self.engine.handle("backward", True)
+        self.assertTrue(down.suppress)
+        self.assertEqual(down.steps[0].value, "ctrl+c")
+        cero = self.engine.handle("0", True)
+        self.assertEqual(cero.steps[0].value, "ctrl+v")
+
+
 class SideMapTest(unittest.TestCase):
     def test_mapea_x1_x2(self):
         engine = LayerEngine(make_profile(), side_button_map={"x1": "backward", "x2": "forward"})

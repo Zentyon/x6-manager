@@ -31,6 +31,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", help="perfil a activar al arrancar")
     p.add_argument("--dry-run", action="store_true",
                    help="no toca hardware ni inyecta teclas; solo log")
+    p.add_argument("--no-onboard", action="store_true",
+                   help="no escribe en el mouse (capas/macros siguen funcionando)")
     p.add_argument("--log-level", default="INFO",
                    choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return p
@@ -44,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         datefmt="%H:%M:%S",
     )
 
-    daemon = Daemon(dry_run=args.dry_run)
+    daemon = Daemon(dry_run=args.dry_run or args.no_onboard)
     if args.profile:
         if args.profile not in daemon.profiles:
             log.error("perfil %r no existe (%s)", args.profile, sorted(daemon.profiles))
@@ -69,7 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     if host is not None:
         def _forward(event: str, **payload) -> None:
             if event == "dpi_button":
+                # el boton DPI no entrega release: solo sirve como shift en toggle
                 host.notify_vendor_button("dpi")
+            else:
+                log.debug("evento daemon: %s %s", event, payload)
 
         daemon.subscribe(_forward)
 

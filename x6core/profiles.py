@@ -28,6 +28,11 @@ MOUSE_BUTTONS = {"left", "right", "middle", "forward", "backward"}
 MEDIA_KEYS = {"play_pause", "next", "previous", "volume_up", "volume_down", "mute"}
 SHIFT_MODES = {"hold", "toggle"}
 LODS = {"1mm", "2mm"}
+# Teclas que el hook de teclado puede usar como disparador de capa. El teclado
+# del dongle (interfaz 3) solo entrega usages 0x00-0x2F: letras, digitos y
+# puntuacion basica. Ojo: ninguna es "libre", porque el hook no distingue si la
+# tecla viene del mouse o del teclado real. Para G-Shift usa un boton lateral.
+KEY_TRIGGERS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
 
 
 class ProfileError(ValueError):
@@ -112,11 +117,14 @@ class Profile:
         if not 0 <= self.debounce_ms <= 255:
             raise ProfileError("debounce_ms fuera de 0..255")
         for name, action in self.buttons.items():
-            if name not in MOUSE_BUTTONS and name != "dpi":
+            if name not in MOUSE_BUTTONS and name != "dpi" and name not in KEY_TRIGGERS:
                 raise ProfileError(f"boton desconocido {name!r}")
             action.validate(f"buttons[{name}]")
-        if self.shift_button and self.shift_button not in MOUSE_BUTTONS | {"dpi"}:
-            raise ProfileError(f"shift_button={self.shift_button!r} desconocido")
+        if self.shift_button and self.shift_button not in MOUSE_BUTTONS | {"dpi"} | KEY_TRIGGERS:
+            raise ProfileError(
+                f"shift_button={self.shift_button!r} desconocido "
+                f"(raton {sorted(MOUSE_BUTTONS)}, dpi o tecla {sorted(KEY_TRIGGERS)})"
+            )
         if self.shift_mode not in SHIFT_MODES:
             raise ProfileError(f"shift_mode={self.shift_mode!r}: {sorted(SHIFT_MODES)}")
         if self.shift_button:
@@ -124,7 +132,7 @@ class Profile:
                 raise ProfileError("shift_button sin shift_layer")
             if self.shift_layer in self.layers:
                 for name, action in self.layers[self.shift_layer].items():
-                    if name not in MOUSE_BUTTONS and name != "dpi":
+                    if name not in MOUSE_BUTTONS and name != "dpi" and name not in KEY_TRIGGERS:
                         raise ProfileError(f"layers[{self.shift_layer}][{name}]: boton desconocido")
                     action.validate(f"layers[{self.shift_layer}][{name}]")
             else:

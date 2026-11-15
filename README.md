@@ -11,6 +11,7 @@ app/                 daemon, tray, UI, entrypoint
 x6core/              protocolo HID, transporte, perfiles, capas, acciones
 x6core/backends/     captura de botones (pynput + hook Win32)
 examples/            perfil de ejemplo con G-Shift
+tools/               escritura/verificacion en hardware (write_config, watchers)
 tests/               tests de protocolo, perfiles y motor de capas
 ```
 
@@ -43,26 +44,124 @@ con `profiles/*.json` y `state.json` (ultimo perfil activo).
 Crea perfiles copiando un JSON de `examples/` a `profiles/`. Se validan al cargar: DPI
 50-26000 multiplo de 50, maximo 8 stages, colores `0xRRGGBB`, etc.
 
-## Protocolo (lo que se sabe)
+## Protocolo (medido y capturado en hardware real)
 
-Todo se escribe por `SET_REPORT` feature `0x0304` en la interfaz 2. Report IDs:
+Verificado el 2026-11-14 sobre un dongle `1d57:fa60` (firmware 0x0113) con dos fuentes
+independientes: lectura pasiva del dongle y captura de los `HidD_SetFeature` del software
+oficial (ver `tools/hidshim/`), con checksums comprobados byte a byte.
 
-| RID | Dir | Bytes | Contenido |
-|-----|-----|-------|-----------|
-| 0x03 | in | 4 | `[03 EV SUB BAT]`: `0x11` heartbeat+bateria, `0x10` boton DPI, `0x50`/`0x12`/`0x21` ACK |
-| 0x04 | feature | 52 | DPI stages, colores, stage activo, flags |
-| 0x05 | feature | 12 | sleep (sin capturar) |
-| 0x06 | feature | 8/9 | polling (sin validar) |
-| 0x07 | feature | 7 | remap de botones onboard (sin capturar) |
-| 0x09 | feature | 63 | macros onboard (sin capturar) |
+### Dos colecciones distintas en la interfaz 2
 
-Payload 0x04: `[0]=0x04 [1]=0x38 [2]=0x01 perfil [5]=mask stages`, lows en `[8..15]`,
-highs en `[16..23]`, `[24]=stage_activo+1`, colores **BGR** en `[25..48]`, `[49]=0x02`,
-checksum = suma de `payload[3:50]` big-endian en `[50..51]`.
+| Coleccion | Direccion | Uso |
+|---|---|---|
+| `usage_page 0x0A` (Col03) | entrada | heartbeat, ACK y avisos de DPI |
+| `usage_page 0x0B` (Col04) | salida | feature reports de configuracion |
 
-DPI en el alambre: `dpi/50 - 1` en 16 bits LE (el X3 usaba indice; no confundir).
+Escribir en `0x0A` devuelve `-1` en Windows. El software oficial escribe con
+`HidD_SetFeature` sobre `0x0B`; en Linux vale hidraw/hidapi sobre la misma interfaz.
 
-El boton DPI fisico reporta el stage **1-indexado** (`stage_from_event()` lo pasa a 0..7).
+**La memoria del mouse es solo de escritura**: `GET_FEATURE` de `0x01..0x0B` da STALL en
+las cuatro colecciones. No se puede leer la config: hay que guardar copia local.
+
+### Reports de escritura (feature, primer byte = report ID)
+
+| RID | Bytes | Contenido |
+|-----|-------|-----------|
+| 0x04 | 56 | DPI stages, colores, stage activo, flags |
+| 0x05 | 15 | luces, sleep, debounce |
+| 0x06 | 9 | polling rate |
+| 0x08 | 59 | mapa de botones: 18 entradas de 3 bytes |
+| 0x09 | 63 | macros onboard (no capturado en detalle) |
+| 0x0C | 10 | **desconocido: no enviar** |
+
+El firmware valida la longitud exacta de cada report; por eso `send()` llama a
+`validate_report()` antes de tocar el hardware.
+
+### Checksums
+
+| Report | Algoritmo | Posicion |
+|---|---|---|
+| 0x04 | suma de `payload[3:50]` en big-endian | `[50:52]` |
+| 0x08 | suma de `payload[3:57] & 0xFF` | `[58]` |
+| 0x06 | complemento a uno | byte final |
+
+### Entrada: `0x03` (5 bytes)
+
+```
+03 10 40 01 0a      # heartbeat: byte2=0x40, byte3=stage activo, byte4*10 = bateria %
+03 10 10 03 0a      # boton DPI fisico: byte3 = stage nuevo
+03 10 50 01 08      # ACK: byte3 = perfil, byte4 = report ID aceptado
+```
+
+El heartbeat llega cada ~2.0 s. **El dongle solo ACKea los reports que cambian algo**:
+reenviar la config ya guardada se acepta pero no produce ACK, asi que la falta de ACK no
+es un error (por eso `apply_config` no aborta).
+
+Payload `0x04`: `[0]=0x04 [1]=0x38 [2]=perfil [5]=mascara de stages`, lows en `[8..15]`,
+highs en `[16..23]`, `[24]=stage_activo+1`, colores **BGR** en `[25..48]`, `[49]=0x01`.
+DPI en el alambre: `dpi/50 - 1` en 16 bits LE.
+
+### Botones: indice en el report `0x08`
+
+Cada entrada es una terna `(codigo, arg1, arg2)`. Las teclas usan `0x11 <mods> <usage>`
+con modificadores ctrl=0x01, shift=0x02, alt=0x04, win=0x08.
+
+| Indice | Boton fisico | Valor de fabrica |
+|---|---|---|
+| 0 / 1 / 2 | izquierdo / derecho / rueda | `02` / `03` / `04` |
+| 3 | celda de configuracion (sin boton en el X6) | `0d` (ciclo de DPI) |
+| 4 / 5 | **los dos de arriba** (ex DPI+ / DPI−) | `1b` / `1c` (volumen) |
+| 6 / 7 | lateral delantero / trasero | `06` / `05` |
+| 8 | sin documentar | `3c` |
+| 9..15 | libres (sin boton fisico) | `01` (off) |
+| 16 / 17 | rueda abajo / arriba | `0a` / `09` |
+
+El boton DPI de detras de la rueda **no genera evento**: lo gestiona el firmware y solo
+avisa por el canal vendor (`03 10 10`), sin release.
+
+### Limite del firmware: que teclas sabe emitir
+
+El teclado del dongle (interfaz 3) no es un teclado completo: su descriptor HID es un
+**mapa de bits limitado a usages `0x00..0x2F`**
+
+```
+05 07 19 e0 29 e7 ...            # modificadores (ctrl/shift/alt/win)
+19 00 29 2f 15 00 25 01 ...      # solo usages 0x00-0x2F
+```
+
+Es decir, **letras, digitos y puntuacion basica** (`- = [ ] ; ' , . /`, Enter, Esc,
+Backspace, Tab, Space). Todo lo que quede fuera de ese rango **nunca llega al SO**,
+aunque el report `0x08` lo ACKe y el software oficial lo liste:
+
+- F1-F12 (`0x3A..0x45`), Scroll Lock (`0x47`), Pause, Insert, flechas, teclado
+  numerico y multimedia **no se emiten**.
+- F13-F24 tampoco existen en la lista oficial: escribir `0x68`/`0x69` deja el boton
+  mudo.
+
+Verificado en hardware: `a` y `b` (`0x11 0x00 0x04` / `0x11 0x00 0x05`) llegan y se
+escriben; `F8`, `F9`, `F13` y `Scroll Lock` no llegan.
+
+Los modificadores **si** funcionan: `Ctrl+C`/`Ctrl+V` (`0x11 0x01 ...`) llegan como
+`ctrl_l` + `'\x03'` / `'\x16'`. Pero un combo `Ctrl+Alt+<tecla>` se interpreta como
+**AltGr**: Windows entrega `ctrl` + `alt` y **ningun caracter**, y los modificadores se
+quedan pulsados, lo que alteraria los clics siguientes. Por eso no sirve como disparador.
+
+**Conclusion practica**: para G-Shift usa un **boton lateral** (`forward`/`backward`),
+que es lo que hace Logitech. El teclado del dongle queda para pruebas o para quien no
+use esas teclas al escribir: si pones `shift_button: "9"`, el hook bloquea tambien el `9`
+del teclado real, porque no puede distinguir el origen. Probado en hardware: con
+`shift_button: "9"` la pulsacion activa la capa y **no** llega ningun caracter a la
+ventana activa.
+
+### Botones: que manda cada uno (X6 con firmware 0x0113)
+
+| Boton | Evento |
+|---|---|
+| Izquierdo / derecho / rueda | botones estandar (`left`/`right`/`middle`) |
+| Los 2 laterales | **XBUTTON1 / XBUTTON2** (`x1` = atras, `x2` = adelante) |
+| Los 2 de arriba | lo asignado en memoria onboard (report `0x08`) |
+| Boton DPI (detras de la rueda) | **nada**: solo `03 10 10` por el canal vendor |
+
 
 ## Capas tipo G-Shift (G-Alt)
 
@@ -88,6 +187,27 @@ Con eso: mantener *adelante* pulsado y tocar *atras* manda `Ctrl+C`; al soltar, 
 vuelve a la normalidad. `shift_mode: "toggle"` alterna la capa con cada pulsacion (util
 para el boton DPI, que por el canal vendor no entrega evento de release).
 
+El perfil verificado en hardware usa el lateral trasero como disparador (lo habitual en
+Logitech: el pulgar mantiene el shift y el resto de botones cambian):
+
+```json
+{
+  "shift_button": "backward",
+  "shift_layer": "shift",
+  "shift_mode": "hold",
+  "layers": {
+    "shift": {
+      "forward": "ctrl+c",
+      "middle": { "kind": "media", "value": "mute", "macro_id": "" }
+    }
+  }
+}
+```
+
+Comprobado de extremo a extremo: `backward` DOWN activa la capa, `forward` en la capa
+inyecta `Ctrl+C` y el evento original queda bloqueado (el navegador no retrocede), y sin
+la capa los botones pasan sin supresion ni latencia.
+
 Acciones disponibles (`kind`): `click` (left/right/middle/forward/backward), `shortcut`
 (tap, ej. `ctrl+alt+1`), `hold` (down al pulsar, up al soltar; ideal para push-to-talk),
 `macro`, `media` (play_pause/next/previous/volume_up/volume_down/mute), `dpi_cycle`,
@@ -111,9 +231,20 @@ Acciones disponibles (`kind`): `click` (left/right/middle/forward/backward), `sh
 python -m unittest discover -s tests -v
 ```
 
-44+ tests sin hardware: layout del payload 0x04, checksum, round-trip DPI, parseo de
-`0x03`, validacion/persistencia de perfiles (incluye migracion del formato viejo) y
-maquina de estados de capas (hold, toggle, release diferido, reset).
+81 tests sin hardware: layout del payload 0x04, checksum, round-trip DPI, parseo de
+`0x03`, validacion/persistencia de perfiles (incluye migracion del formato viejo),
+maquina de estados de capas (hold, toggle, release diferido, reset) y disparadores de
+teclado del rango `0x00-0x2F`.
+
+Verificacion con hardware real (herramientas en `tools/`):
+
+```bash
+python tools/write_config.py --set dpi_up=9 --set dpi_down=0 --yes   # escribe 0x08 con ACK
+python tools/watch_keys.py --seconds 60      # que manda cada boton al SO
+python tools/watch_status.py --seconds 60    # heartbeats y ACKs del dongle
+python tools/gshift_demo.py --profile gshift-side --seconds 120
+python tools/mute_state.py --seconds 60      # prueba objetiva de media:mute
+```
 
 ## Pendiente
 

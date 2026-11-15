@@ -5,3 +5,12 @@ build/
 dist/
 *.egg-info/
 .pytest_cache/
+
+# capturas y artefactos de compilacion del shim HID (ver tools/hidshim/)
+tools/hidshim/*.dll
+tools/hidshim/*.obj
+tools/hidshim/*.lib
+tools/hidshim/*.exp
+tools/hidshim/*.log
+tools/hidshim/*.txt
+tools/_*.md
