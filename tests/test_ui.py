@@ -169,6 +169,25 @@ class UiTest(unittest.TestCase):
         saved = window._commit()
         self.assertEqual(saved.shift_button, "q")
 
+    def test_auto_usa_la_ultima_ventana_vista(self):
+        from x6core.appwatch import Window
+
+        window, _daemon = self._window()
+        window._last_window = Window("reaper.exe", "REAPER")
+        window.auto_current_btn.click()
+        self.assertEqual(window._auto_patterns(), ["reaper.exe"])
+
+    def test_auto_ignora_su_propia_ventana(self):
+        from x6core.appwatch import Window
+
+        window, _daemon = self._window()
+        propios = Window(window._own_process, "X6 Manager")
+        with mock.patch("app.ui.foreground_window", lambda: propios):
+            window._last_window = None
+            window.auto_current_btn.click()
+        self.assertEqual(window._auto_patterns(), [])
+        self.assertIn("X6 Manager", window.status.text())
+
     def test_patrones_auto_se_guardan(self):
         window, _daemon = self._window()
         window.auto_edit.setText("cs2.exe")

@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
+import sys
 import threading
 
 try:  # pragma: no cover - depende de extras instalados
-    from PySide6.QtCore import QObject, Qt, Signal
+    from PySide6.QtCore import QObject, Qt, QTimer, Signal
     from PySide6.QtGui import QColor, QFont
     from PySide6.QtWidgets import (
         QAbstractItemView, QApplication, QCheckBox, QColorDialog, QComboBox,
@@ -39,6 +41,7 @@ from x6core.profiles import (
     profiles_dir,
 )
 from x6core.protocol import DPI_MAX, DPI_MIN, DPI_STEP, POLLING_MAP
+from x6core.appwatch import foreground_window
 
 log = logging.getLogger(__name__)
 
@@ -83,6 +86,13 @@ if HAS_QT:  # pragma: no cover - requiere Qt y una sesion grafica
             self._layer_origin = ""
             self._loading = False
             self._active_color = QColor("#2e9e6b")
+            self._own_process = os.path.basename(sys.executable).lower()
+            self._last_window = None
+            # Antes de que la ventana se muestre, el primer plano es la app que el
+            # usuario estaba usando: es la que interesa recordar.
+            initial = foreground_window()
+            if initial and initial.process and initial.process.lower() != self._own_process:
+                self._last_window = initial
             self._stage_color = 0xFFFFFF
 
             self.bridge = _Bridge()
@@ -95,6 +105,10 @@ if HAS_QT:  # pragma: no cover - requiere Qt y una sesion grafica
 
             self._build_ui()
             self._wire()
+            self._fg_timer = QTimer(self)
+            self._fg_timer.setInterval(800)
+            self._fg_timer.timeout.connect(self._remember_foreground)
+            self._fg_timer.start()
             self.daemon.subscribe(self._forward_event)
             self._reload_list(self.daemon.active)
             if self._current_name == "":
@@ -342,12 +356,13 @@ if HAS_QT:  # pragma: no cover - requiere Qt y una sesion grafica
             row.addWidget(self.auto_remove_btn)
             layout.addLayout(row)
 
-            self.auto_current_btn = QPushButton("Usar la app en primer plano")
+            self.auto_current_btn = QPushButton("Usar la ultima app en primer plano")
             layout.addWidget(self.auto_current_btn)
             auto_note = QLabel(
                 "El cambio espera ~0.8 s con la misma app delante (para no reescribir "
                 "el mouse al hacer alt-tab) y vuelve al perfil base al cerrar la app. "
-                "Guardar y aplicar el perfil para que el daemon lo vea."
+                "Guardar ya pone las reglas a disposición del daemon: no hace falta "
+                "que este sea el perfil activo."
             )
             auto_note.setWordWrap(True)
             auto_note.setStyleSheet("color: #888;")
@@ -1013,13 +1028,23 @@ if HAS_QT:  # pragma: no cover - requiere Qt y una sesion grafica
             if row >= 0:
                 self.auto_list.takeItem(row)
 
-        def _on_auto_current(self) -> None:
-            from x6core.appwatch import foreground_window
-
+        def _remember_foreground(self) -> None:
             window = foreground_window()
+            if (window and window.process
+                    and window.process.lower() != self._own_process):
+                self._last_window = window
+
+        def _on_auto_current(self) -> None:
+            window = self._last_window or foreground_window()
             if not window or not window.process:
                 self.status.setText(
-                    "No se pudo leer la ventana activa (o no tiene proceso)."
+                    "No se pudo leer la ultima ventana activa (o no tiene proceso)."
+                )
+                return
+            if window.process.lower() == self._own_process:
+                self.status.setText(
+                    "La ventana activa es el propio X6 Manager: enfoca la app y "
+                    "vuelve a intentarlo."
                 )
                 return
             pattern = window.process
@@ -1102,6 +1127,7 @@ if HAS_QT:  # pragma: no cover - requiere Qt y una sesion grafica
                 if answer == QMessageBox.StandardButton.Save and not self._save_silent():
                     event.ignore()
                     return
+            self._fg_timer.stop()
             self.daemon.unsubscribe(self._forward_event)
             super().closeEvent(event)
 

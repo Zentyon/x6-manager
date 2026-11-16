@@ -332,7 +332,7 @@ Acciones disponibles (`kind`): `click` (left/right/middle/forward/backward), `sh
 python -m unittest discover -s tests -v
 ```
 
-121 tests sin hardware: layout del payload 0x04, checksum, round-trip DPI, parseo de
+123 tests sin hardware: layout del payload 0x04, checksum, round-trip DPI, parseo de
 `0x03`, validacion/persistencia de perfiles (incluye migracion del formato viejo),
 maquina de estados de capas (hold, toggle, release diferido, reset), disparadores de
 teclado del rango `0x00-0x2F`, reglas de auto-cambio (ejecutable, titulo, comodines,
