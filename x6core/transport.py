@@ -31,6 +31,7 @@ from .protocol import (
     REPORT_LENGTHS,
     RID_COMMIT,
     RID_DPI,
+    RID_MACRO,
     RID_STATUS,
     STATUS_USAGE,
     STATUS_USAGE_PAGE,
@@ -271,21 +272,41 @@ class Dongle:
         )
 
     # -- escritura ---------------------------------------------------------
-    def send(self, payload: bytes) -> int:
-        """Envia un feature report validando ID y longitud exacta."""
+    def send(self, payload: bytes, retries: int = 5,
+             retry_delay: float = 0.25) -> int:
+        """Envia un feature report validando ID y longitud exacta.
+
+        Reintenta si el dongle rechaza el SET_FEATURE. Pasa de verdad con el
+        X6 inalambrico: mientras el raton duerme, el receptor devuelve
+        `ERROR_INVALID_PARAMETER` y el primer envio (o los primeros) fallan
+        hasta que el enlace despierta. La app oficial tambien reintenta
+        (5 veces, 200 ms).
+        """
         payload = bytes(validate_report(bytes(payload)))
         with self._lock:
             if self._closed:
                 raise RuntimeError("dongle cerrado")
-            if self._writer is not None:
-                self._writer.send(payload)
-            else:
-                n = self._dev.send_feature_report(payload)
-                if n != len(payload):
-                    raise IOError(
-                        f"send_feature_report escribio {n} de {len(payload)} bytes"
-                    )
-        return len(payload)
+            last: Exception | None = None
+            for attempt in range(1, max(1, retries) + 1):
+                try:
+                    if self._writer is not None:
+                        self._writer.send(payload)
+                    else:
+                        n = self._dev.send_feature_report(payload)
+                        if n != len(payload):
+                            raise IOError(
+                                f"send_feature_report escribio {n} de "
+                                f"{len(payload)} bytes"
+                            )
+                    return len(payload)
+                except OSError as exc:
+                    last = exc
+                    if attempt < retries:
+                        log.debug("SET_FEATURE %#04x fallo (intento %d/%d): %s",
+                                  payload[0], attempt, retries, exc)
+                        time.sleep(retry_delay)
+            assert last is not None
+            raise last
 
     def wait_ack(self, report_id: int | None = None, timeout_s: float = 2.0) -> dict:
         """Espera el ACK `03 10 50 <perfil> <report_id>` del dongle."""
@@ -368,6 +389,30 @@ class Dongle:
                 return True
             except TimeoutError:
                 log.info("SET_FEATURE enviado sin ACK (revisa el cable/receptor)")
+                return False
+
+    def apply_macro(self, reports, ack_timeout: float = 1.5,
+                    gap: float = 0.05) -> bool:
+        """Envia los 3 chunks de un macro (report 0x09) y espera el ACK.
+
+        Los chunks van con el mismo report ID, asi que no pueden pasar por
+        `apply_config` (que deduplica por ID). Devuelve True si hubo ACK.
+        """
+        chunks = [bytes(validate_report(bytes(r))) for r in reports]
+        if len(chunks) != 3:
+            raise ValueError(f"un macro son 3 chunks, hay {len(chunks)}")
+        for index, chunk in enumerate(chunks):
+            if chunk[0] != RID_MACRO or chunk[3] != index:
+                raise ValueError(f"chunk {index} inesperado: {chunk[:4].hex(' ')}")
+        with self._lock:
+            for chunk in chunks:
+                self.send(chunk)
+                time.sleep(gap)
+            try:
+                self.wait_ack(RID_MACRO, ack_timeout)
+                return True
+            except TimeoutError:
+                log.info("macro enviado sin ACK (revisa el receptor)")
                 return False
 
     # -- ciclo de vida -----------------------------------------------------

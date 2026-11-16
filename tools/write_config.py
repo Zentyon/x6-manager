@@ -71,20 +71,24 @@ def load_state() -> dict | None:
         return None
 
 
-def save_state(reports: dict[str, str]) -> None:
+def save_state(reports: dict[str, str], macros: dict | None = None) -> None:
     path = state_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
         "updated": dt.datetime.now().isoformat(timespec="seconds"),
         "reports": reports,
     }
+    if macros:
+        data["macros"] = macros
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
-def save_backup(reports: dict[str, str], reason: str) -> Path:
+def save_backup(reports: dict[str, str], reason: str, macros: dict | None = None) -> Path:
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = backups_dir() / f"onboard-{stamp}.json"
     data = {"created": stamp, "reason": reason, "reports": reports}
+    if macros:
+        data["macros"] = macros
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return path
 
@@ -118,6 +122,8 @@ def _reverse_key(usage: int) -> str:
 
 def describe_entry(entry) -> str:
     code, arg1, arg2 = p.normalize_slot(entry)
+    if code == 0x12:
+        return f"macro slot {arg2}"
     if code == 0x11:
         mods = [name for name, bit in (("ctrl", 1), ("shift", 2), ("alt", 4), ("win", 8))
                 if arg1 & bit]
@@ -189,6 +195,16 @@ def build(args, base: dict[int, bytes]) -> dict[int, bytes]:
 
     slots = _slots_from(reports[p.RID_BUTTONS])
     parse_set(args.set, slots)
+    if args.map_macro:
+        if not args.macro_slot:
+            raise SystemExit("--map-macro necesita --macro-slot")
+        name = p.BUTTON_INDEX_ALIASES.get(args.map_macro, args.map_macro)
+        if name not in p.BUTTON_INDEX:
+            raise SystemExit(
+                f"boton desconocido {args.map_macro!r}; validos: "
+                f"{sorted(p.BUTTON_INDEX)}"
+            )
+        slots[p.BUTTON_INDEX[name]] = p.macro_entry(args.macro_slot)
     reports[p.RID_BUTTONS] = p.build_buttons_report(slots)
 
     if args.dpi:
@@ -225,6 +241,31 @@ def _slots_from(report: bytes) -> list:
     return [tuple(report[3 + i * 3:6 + i * 3]) for i in range(p.BUTTON_SLOTS)]
 
 
+def macro_events(text: str, delay: int = 40) -> list[tuple[str, bool, int]]:
+    """Convierte texto en eventos del macro (pulsacion y suelta por caracter)."""
+    events: list[tuple[str, bool, int]] = []
+    for ch in text:
+        key = "space" if ch == " " else ch.lower() if ch.isalpha() else ch
+        if key not in p.KEY_USAGE:
+            raise SystemExit(
+                f"caracter no representable en un macro: {ch!r} "
+                "(solo teclas de KEY_USAGE: letras, digitos y puntuacion)"
+            )
+        events.append((key, True, delay))
+        events.append((key, False, delay))
+    if not events:
+        raise SystemExit("--macro-text vacio")
+    return events
+
+
+def describe_macro(report: bytes) -> str:
+    count = report[28]
+    items = report[29:29 + count * 2]
+    return (f"slot={report[2]} items={count} play={report[7]} "
+            f"cabecera={report[3:7].hex(' ')}\n"
+            f"  items: {items.hex(' ')}")
+
+
 # --- main -----------------------------------------------------------------
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
@@ -238,6 +279,13 @@ def main() -> int:
     ap.add_argument("--misc-hex", help="report 0x05 completo en hex (avanzado)")
     ap.add_argument("--with-misc", action="store_true",
                     help="incluye el 0x05 capturado (luces/sleep) sin cambios")
+    ap.add_argument("--macro-slot", type=int,
+                    help="slot del macro (1..18 = indice de boton + 1)")
+    ap.add_argument("--macro-text", help="texto que teclea el macro (p.ej. \"abc\")")
+    ap.add_argument("--macro-delay", type=int, default=40,
+                    help="ms antes de cada pulsacion/suelta (por defecto 40)")
+    ap.add_argument("--map-macro", metavar="BOTON",
+                    help="asigna ese boton al macro de --macro-slot")
     ap.add_argument("--dry-run", action="store_true", help="solo muestra y valida")
     ap.add_argument("--yes", action="store_true", help="escribir de verdad en el mouse")
     ap.add_argument("--show", action="store_true", help="muestra el estado local")
@@ -254,11 +302,27 @@ def main() -> int:
             print("aviso: no hay estado local; se parte del baseline capturado.")
         reports = build(args, reports_from_state(state))
 
+    macro_reports = None
+    macro_meta = None
+    if args.macro_text:
+        if not args.macro_slot:
+            raise SystemExit("--macro-text necesita --macro-slot")
+        events = macro_events(args.macro_text, args.macro_delay)
+        macro_reports = p.build_macro_reports(events, slot=args.macro_slot)
+        logical = p.build_macro_logical(events, slot=args.macro_slot)
+        macro_meta = {"text": args.macro_text, "delay": args.macro_delay,
+                      "logical": logical.hex()}
+
     if args.show:
         print(f"estado local: {state_file()}")
         for rid in sorted(reports):
             print(f"\n=== 0x{rid:02x} ({REPORT_NAMES.get(rid, '?')}) ===")
             print(describe_report(reports[rid]))
+        stored = (load_state() or {}).get("macros") or {}
+        for slot, info in sorted(stored.items(), key=lambda kv: int(kv[0])):
+            print(f"\n=== macro slot {slot} (guardado) ===")
+            print(f"texto {info.get('text')!r} delay {info.get('delay')} ms")
+            print("hex:", info.get("logical", ""))
         return 0
 
     print("reports a enviar (en este orden):")
@@ -268,19 +332,27 @@ def main() -> int:
         print(describe_report(reports[rid]))
         print("hex:", reports[rid].hex(" "))
 
+    if macro_reports:
+        print(f"\n=== 0x09 (macro slot {args.macro_slot}, 3 chunks) ===")
+        print(describe_macro(bytes.fromhex(macro_meta["logical"])))
+        for index, chunk in enumerate(macro_reports):
+            print(f"chunk {index}:", chunk.hex(" "))
+
     if args.dry_run or not args.yes:
         if not args.dry_run:
             print("\nDRY-RUN: agrega --yes para escribir en el mouse.")
         return 0
 
-    previous = reports_from_state(load_state())
+    state = load_state() or {}
+    previous = reports_from_state(state)
     backup = save_backup({f"0x{rid:02x}": rep.hex() for rid, rep in previous.items()},
-                         "antes de escribir")
+                         "antes de escribir", state.get("macros"))
     print(f"\nbackup guardado en: {backup}")
 
     try:
         with Dongle.open() as dongle:
             results = dongle.apply_config(reports.values())
+            macro_acked = dongle.apply_macro(macro_reports) if macro_reports else None
     except OSError as exc:
         print(f"\nERROR de comunicacion: {exc}")
         print("No se guardo el estado local; usa --restore con el backup si hace falta.")
@@ -289,7 +361,12 @@ def main() -> int:
     for rid, acked in results:
         note = "ACK" if acked else "sin ACK (ya estaba igual)"
         print(f"  0x{rid:02x}: {note}")
-    save_state({f"0x{rid:02x}": rep.hex() for rid, rep in reports.items()})
+    if macro_acked is not None:
+        print(f"  0x09: {'ACK' if macro_acked else 'sin ACK'}")
+    macros = dict(state.get("macros") or {})
+    if macro_meta:
+        macros[str(args.macro_slot)] = macro_meta
+    save_state({f"0x{rid:02x}": rep.hex() for rid, rep in reports.items()}, macros)
     print(f"estado guardado en: {state_file()}")
     return 0
 

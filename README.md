@@ -71,11 +71,13 @@ las cuatro colecciones. No se puede leer la config: hay que guardar copia local.
 | 0x05 | 15 | luces, sleep, debounce |
 | 0x06 | 9 | polling rate |
 | 0x08 | 59 | mapa de botones: 18 entradas de 3 bytes |
-| 0x09 | 63 | macros onboard (no capturado en detalle) |
+| 0x09 | 64 | macros onboard: 3 chunks (ver abajo) |
 | 0x0C | 10 | **desconocido: no enviar** |
 
-El firmware valida la longitud exacta de cada report; por eso `send()` llama a
-`validate_report()` antes de tocar el hardware.
+El firmware valida la longitud de cada report; por eso `send()` llama a
+`validate_report()` antes de tocar el hardware. Ojo con `0x09`: **los tres chunks
+viajan en buffers de 64 bytes**, aunque el ultimo solo lleve 12 bytes utiles; con
+menos, `HidD_SetFeature` devuelve `ERROR_INVALID_PARAMETER`.
 
 ### Checksums
 
@@ -118,6 +120,56 @@ con modificadores ctrl=0x01, shift=0x02, alt=0x04, win=0x08.
 
 El boton DPI de detras de la rueda **no genera evento**: lo gestiona el firmware y solo
 avisa por el canal vendor (`03 10 10`), sin release.
+
+### Macros onboard (`0x09`) — verificado en hardware
+
+El macro vive en el raton y se ejecuta **sin ningun software en el PC**. Es lo mas
+parecido a "configuracion que viaja con el mouse".
+
+Prueba completa: macro `abc` en el slot 7, boton delantero mapeado a ese macro con
+`0x08 = 12 00 07`, y al pulsar el lateral aparecio `abc` en el Bloc de notas con el
+daemon parado.
+
+Buffer logico de 131 bytes, enviado en 3 chunks:
+
+```
+L[0]=09  L[1]=0x83 (longitud logica)  L[2]=slot (indice de boton + 1)
+L[3..6]   cabecera (campos de la estructura de macro de la app; 0 sirve)
+L[7]      modo de reproduccion (minimo 1)
+L[8..27]  0
+L[28]     numero de items de 2 bytes
+L[29..128] items
+L[129..130] suma de L[3..128] en big-endian
+```
+
+En el cable cada chunk es `09 <len> <slot> <chunk#> + datos`:
+
+| chunk | `len` | datos |
+|---|---|---|
+| 0 | `0x40` | 60 B de `L[3..62]` |
+| 1 | `0x40` | 60 B de `L[62..121]` |
+| 2 | `0x0C` | 8 B de `L[123..130]` (6 de datos + checksum), resto a cero |
+
+Item de un evento `(tecla, pulsada, retardo_ms)`:
+
+- retardo ≤ 1270 ms: `[round(delay/10) | flag, usage]`, con `flag = 0x01` al pulsar y
+  `0x81` al soltar (el bit 7 es "suelta").
+- retardo > 1270 ms: ese byte solo tiene 7 bits, asi que el evento lleva el resto y se
+  anade un item extra `[delay/200, 0x03]`.
+
+`usage` es el HID keyboard usage (el mismo de `KEY_USAGE`). Caben 50 items de 2 bytes.
+
+Asignacion al boton: la entrada del `0x08` es `(0x12, 0x00, slot)`.
+
+```
+py tools/write_config.py --macro-slot 7 --macro-text "abc" \
+    --map-macro forward --yes       # escribe el macro y mapea el lateral delantero
+py tools/write_config.py --set forward=forward --yes    # deshacer el mapeo
+```
+
+Los macros se guardan tambien en `onboard.json` (no se pueden leer del raton). El
+`0x09` no pasa por `apply_config` porque los 3 chunks comparten report ID: usa
+`Dongle.apply_macro()`.
 
 ### Limite del firmware: que teclas sabe emitir
 
@@ -248,8 +300,10 @@ python tools/mute_state.py --seconds 60      # prueba objetiva de media:mute
 
 ## Pendiente
 
-- Capturar con usbmon/Wireshark: `0x07` (remap onboard), `0x09` (macros onboard),
-  `0x06` (checksum del polling: el corto usa complemento a uno y no coincide con el
+- `0x07` (remap onboard): sin capturar; permitiria reasignar botones sin PC.
+- Macros onboard: **ya funciona** (ver arriba); falta probar si el teclado del dongle
+  limita tambien su reproduccion igual que el `0x08`.
+- `0x06` (checksum del polling: el corto usa complemento a uno y no coincide con el
   aditivo del 0x04), `0x05` (sleep).
 - LOD/debounce/angle-snap/motion-sync: hoy solo se guardan, no se envian.
 - Auto-switch por app (`auto_apps`), autostart en Windows, backend `evdev` para Linux.

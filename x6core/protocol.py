@@ -419,11 +419,181 @@ def action_entry(spec) -> tuple[int, int, int]:
     )
 
 
+def macro_entry(slot: int) -> tuple[int, int, int]:
+    """Accion "macro" para el report 0x08: `(0x12, 0x00, slot)`.
+
+    `slot` es el numero que se usa en el report 0x09 (indice de boton + 1).
+    """
+    if not isinstance(slot, int) or not 1 <= slot <= BUTTON_SLOTS:
+        raise ValueError(f"slot de macro fuera de rango: {slot!r}")
+    return 0x12, 0x00, slot
+
+
+# --- report 0x09: macros onboard -----------------------------------------
+#
+# Un macro es una secuencia de eventos de teclado con su retardo, guardada en
+# el raton. Se envia en 3 feature reports que juntos forman un buffer logico:
+#
+#   L[0]=0x09  L[1]=0x83 (longitud logica)  L[2]=slot (indice de boton + 1)
+#   L[3..6]   cabecera tal cual la manda la app oficial
+#   L[7]      modo de reproduccion (minimo 1)
+#   L[8..27]  0
+#   L[28]     numero de items de 2 bytes
+#   L[29..128] items
+#   L[129..130] suma de L[3..128] en big-endian
+#
+# En el cable cada chunk es `09 <len> <slot> <chunk#> + datos`, donde `len` es
+# la longitud total del report (los 4 bytes de cabecera incluidos).
+#
+# Las cabeceras (semantica de L[3..7]) no estan confirmadas: la app las rellena
+# con campos de su estructura de macro. Con 0 / 1 el firmware acepta el macro
+# igual, segun la captura de la familia (CMS_4).
+
+MACRO_LOGICAL_LEN = 131
+MACRO_CONTENT_LEN = 126          # L[3..128]
+MACRO_ITEM_OFFSET = 29
+MACRO_ITEM_BYTES = 100           # L[29..128]
+MACRO_ITEMS_MAX = MACRO_ITEM_BYTES // 2
+MACRO_DELAY_SPLIT = 1270         # ms; por encima se parte en un item extra
+MACRO_PRESS = 0x01
+MACRO_RELEASE = 0x81
+MACRO_LONG_MARK = 0x03
+MACRO_REPORT_LEN = 64            # tamano del feature report en el X6
+MACRO_REPORT_LENS = frozenset({12, 14, 63, 64})
+"""Longitudes validas de un chunk de macro (12/14 = ultimo chunk sin relleno)."""
+
+
+def macro_key(key) -> int:
+    """Acepta un nombre de `KEY_USAGE` ("a", "enter") o un usage 0..255."""
+    if isinstance(key, int) and not isinstance(key, bool):
+        usage = key
+    else:
+        name = str(key).strip().lower()
+        if name not in KEY_USAGE:
+            raise ValueError(f"tecla desconocida para macro: {key!r}")
+        usage = KEY_USAGE[name]
+    if not 0 <= usage <= 0xFF:
+        raise ValueError(f"usage fuera de rango: {usage!r}")
+    return usage
+
+
+def encode_macro_event(key, pressed: bool, delay_ms: int = 0) -> bytes:
+    """Codifica un evento (tecla, pulsacion, retardo) en 2 o 4 bytes.
+
+    Retardo <= 1270 ms: `[round(delay/10) | flag, usage]` (flag 0x01 pulsa,
+    0x81 suelta; el bit 7 es el de "soltar").
+    Retardo > 1270 ms: el evento con el resto y un item extra
+    `[delay/200, 0x03]`, porque el primer byte solo tiene 7 bits utiles.
+    """
+    usage = macro_key(key)
+    delay = int(delay_ms)
+    if delay < 0:
+        raise ValueError(f"retardo negativo: {delay_ms!r}")
+    flag = MACRO_PRESS if pressed else MACRO_RELEASE
+    if delay <= MACRO_DELAY_SPLIT:
+        return bytes([(round(delay / 10) & 0x7F) | flag, usage])
+    head = bytes([(round((delay % 200) / 10) & 0x7F) | flag, usage])
+    return head + bytes([delay // 200, MACRO_LONG_MARK])
+
+
+def build_macro_logical(events, slot: int = 1, header: bytes = b"\x00\x00\x00\x00",
+                        play: int = 1) -> bytes:
+    """Buffer logico de 131 bytes del report 0x09.
+
+    `events` es una secuencia de `(tecla, pulsada, retardo_ms)`.
+    """
+    if not isinstance(slot, int) or not 1 <= slot <= BUTTON_SLOTS:
+        raise ValueError(f"slot de macro fuera de rango: {slot!r}")
+    header = bytes(header)
+    if len(header) != 4:
+        raise ValueError(f"la cabecera son 4 bytes, hay {len(header)}")
+    if not 0 <= int(play) <= 0xFF:
+        raise ValueError(f"modo de reproduccion invalido: {play!r}")
+
+    items = b"".join(encode_macro_event(*event) for event in events)
+    if len(items) > MACRO_ITEM_BYTES:
+        raise ValueError(
+            f"macro demasiado larga: {len(items)} B de {MACRO_ITEM_BYTES} "
+            f"(maximo {MACRO_ITEMS_MAX} items de 2 B)"
+        )
+
+    buf = bytearray(MACRO_LOGICAL_LEN)
+    buf[0] = RID_MACRO
+    buf[1] = MACRO_LOGICAL_LEN
+    buf[2] = slot
+    buf[3:7] = header
+    buf[7] = int(play)
+    buf[28] = len(items) // 2
+    buf[MACRO_ITEM_OFFSET:MACRO_ITEM_OFFSET + len(items)] = items
+    checksum = sum(buf[3:MACRO_LOGICAL_LEN - 2]) & 0xFFFF
+    buf[-2] = checksum >> 8
+    buf[-1] = checksum & 0xFF
+    return bytes(buf)
+
+
+def build_macro_reports(events, slot: int = 1, report_len: int = MACRO_REPORT_LEN,
+                        header: bytes = b"\x00\x00\x00\x00",
+                        play: int = 1) -> list[bytes]:
+    """Divide el macro en los 3 feature reports que espera el dongle.
+
+    Todos los reports salen del tamano del HID (`report_len`, 64 en el X6,
+    verificado en hardware: Windows rechaza los cortos). El ultimo lleva solo
+    los 8 bytes utiles (6 de datos + checksum) y el resto a cero, con el byte
+    de longitud a 12; el firmware lo acepta asi y devuelve ACK.
+
+    Con `report_len=63` el ultimo chunk lleva 10 bytes y el byte de longitud
+    vale 14 (variante de la familia, sin verificar en este dongle).
+    """
+    chunk = int(report_len) - 4
+    if not 8 <= chunk <= MACRO_CONTENT_LEN:
+        raise ValueError(f"longitud de report invalida: {report_len!r}")
+    logical = build_macro_logical(events, slot=slot, header=header, play=play)
+
+    reports: list[bytes] = []
+    for index in range(3):
+        start = 3 + index * chunk
+        if index == 2:
+            data = logical[start:]
+            length = 4 + len(data)
+        else:
+            data = logical[start:start + chunk]
+            length = report_len
+        report = bytes([RID_MACRO, length, slot, index]) + bytes(data)
+        if len(report) < report_len:
+            report += bytes(report_len - len(report))
+        reports.append(report)
+    return reports
+
+
 def validate_report(payload: bytes) -> bytes:
     """Comprueba report ID y longitud exacta antes de enviar nada al mouse."""
     if not payload:
         raise ValueError("report vacio")
     rid = payload[0]
+    if rid == RID_MACRO:
+        # Los macros van en 3 chunks: dos llenos y el ultimo con el checksum.
+        if len(payload) not in MACRO_REPORT_LENS:
+            raise ValueError(
+                f"report {rid:#04x}: longitud {len(payload)} no valida "
+                f"(esperadas {sorted(MACRO_REPORT_LENS)})"
+            )
+        chunk = payload[3]
+        if chunk > 2:
+            raise ValueError(f"report {rid:#04x}: chunk {chunk} inexistente")
+        if chunk < 2:
+            if payload[1] != len(payload):
+                raise ValueError(
+                    f"report {rid:#04x}: byte de longitud {payload[1]} != "
+                    f"{len(payload)}"
+                )
+        else:
+            if payload[1] not in (12, 14):
+                raise ValueError(
+                    f"report {rid:#04x}: longitud util {payload[1]} no valida"
+                )
+            if any(payload[payload[1]:]):
+                raise ValueError("ultimo chunk del macro con relleno no nulo")
+        return payload
     expected = REPORT_LENGTHS.get(rid)
     if expected is None:
         raise ValueError(f"report ID {rid:#04x} no es de escritura")

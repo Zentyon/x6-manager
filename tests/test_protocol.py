@@ -243,5 +243,79 @@ class ParseStatusTest(unittest.TestCase):
         self.assertEqual(st["sub"], 0x00)
 
 
+class MacroTest(unittest.TestCase):
+    def test_evento_corto(self):
+        self.assertEqual(p.encode_macro_event("a", True, 0), bytes([0x01, 0x04]))
+        self.assertEqual(p.encode_macro_event("a", False, 100), bytes([0x8B, 0x04]))
+        # 1270 ms es el maximo que cabe en 7 bits de decimas
+        self.assertEqual(p.encode_macro_event("b", True, 1270), bytes([0x7F, 0x05]))
+
+    def test_evento_largo_parte_el_retardo(self):
+        # 2000 ms -> resto 0 ms en el evento + item extra (2000 // 200, 0x03)
+        self.assertEqual(p.encode_macro_event("a", True, 2000),
+                         bytes([0x01, 0x04, 0x0A, 0x03]))
+        self.assertEqual(p.encode_macro_event("a", False, 2450),
+                         bytes([0x85, 0x04, 0x0C, 0x03]))
+
+    def test_buffer_logico(self):
+        buf = p.build_macro_logical([("a", True, 0), ("a", False, 50)], slot=7)
+        self.assertEqual(len(buf), 131)
+        self.assertEqual(buf[0], 0x09)
+        self.assertEqual(buf[1], 131)
+        self.assertEqual(buf[2], 7)
+        self.assertEqual(buf[7], 1)
+        self.assertEqual(buf[28], 2)
+        self.assertEqual(buf[29:33], bytes([0x01, 0x04, 0x85, 0x04]))
+        self.assertEqual(buf[-2] << 8 | buf[-1], sum(buf[3:129]) & 0xFFFF)
+
+    def test_chunks_64(self):
+        reports = p.build_macro_reports([("a", True, 0)], slot=3, report_len=64)
+        self.assertEqual([len(r) for r in reports], [64, 64, 64])
+        self.assertEqual([r[1] for r in reports], [64, 64, 12])
+        self.assertEqual([r[3] for r in reports], [0, 1, 2])
+        self.assertTrue(all(r[0] == 0x09 and r[2] == 3 for r in reports))
+        logical = p.build_macro_logical([("a", True, 0)], slot=3)
+        joined = reports[0][4:] + reports[1][4:] + reports[2][4:12]
+        self.assertEqual(joined, logical[3:])
+        self.assertEqual(reports[2][12:], bytes(52))
+
+    def test_chunks_63(self):
+        reports = p.build_macro_reports([("a", True, 0)], slot=3, report_len=63)
+        self.assertEqual([len(r) for r in reports], [63, 63, 63])
+        self.assertEqual([r[1] for r in reports], [63, 63, 14])
+        logical = p.build_macro_logical([("a", True, 0)], slot=3)
+        joined = reports[0][4:] + reports[1][4:] + reports[2][4:14]
+        self.assertEqual(joined, logical[3:])
+
+    def test_chunks_pasan_la_validacion(self):
+        for length in (63, 64):
+            for report in p.build_macro_reports([("a", True, 0)], report_len=length):
+                self.assertEqual(p.validate_report(report), report)
+
+    def test_validacion_rechaza_longitud_mala(self):
+        report = bytearray(p.build_macro_reports([("a", True, 0)], report_len=64)[0])
+        report[1] = 63
+        with self.assertRaises(ValueError):
+            p.validate_report(bytes(report))
+        with self.assertRaises(ValueError):
+            p.validate_report(bytes([0x09, 20]) + bytes(18))
+
+    def test_macro_demasiado_largo(self):
+        events = [("a", True, 0), ("a", False, 0)] * 30
+        with self.assertRaises(ValueError):
+            p.build_macro_logical(events)
+
+    def test_entrada_de_boton_macro(self):
+        self.assertEqual(p.macro_entry(6), (0x12, 0x00, 6))
+        self.assertEqual(p.action_entry((0x12, 0, 6)), (0x12, 0, 6))
+        for bad in (0, 19, "6"):
+            with self.assertRaises(ValueError):
+                p.macro_entry(bad)
+
+    def test_tecla_desconocida(self):
+        with self.assertRaises(ValueError):
+            p.encode_macro_event("nope", True, 0)
+
+
 if __name__ == "__main__":
     unittest.main()
