@@ -26,6 +26,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-host", action="store_true",
                    help="no capturar botones: solo aplicar perfiles onboard")
     p.add_argument("--no-hotkeys", action="store_true", help="sin Ctrl+Alt+1..9")
+    p.add_argument("--no-auto-apps", action="store_true",
+                   help="no cambiar de perfil al abrir aplicaciones")
+    p.add_argument("--auto-settle", type=float, default=0.8,
+                   help="segundos con la misma app delante antes de cambiar (0.8)")
     p.add_argument("--swap-side-buttons", action="store_true",
                    help="intercambia atras/adelante si el mouse los manda al reves")
     p.add_argument("--profile", help="perfil a activar al arrancar")
@@ -83,8 +87,18 @@ def main(argv: list[str] | None = None) -> int:
     threading.Thread(target=daemon.monitor_loop, args=(stop,), name="x6-monitor",
                      daemon=True).start()
 
+    auto = None
+    if not args.no_auto_apps:
+        from x6core.appwatch import AutoSwitcher
+
+        auto = AutoSwitcher(daemon, settle=args.auto_settle)
+        threading.Thread(target=auto.run, args=(stop,), name="x6-autoapps",
+                         daemon=True).start()
+
     def _shutdown() -> None:
         stop.set()
+        if auto is not None:
+            auto.close()
         if host is not None:
             host.stop()
         daemon.stop()

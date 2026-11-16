@@ -1,10 +1,12 @@
 # X6 Manager
 
 Manager para el mouse **Attack Shark X6** (USB `1d57:fa60`): DPI onboard, perfiles,
-bandeja del sistema, UI Qt y **capas tipo G-Shift** por software.
+bandeja del sistema, UI Qt, **capas tipo G-Shift** por software y **cambio automatico de
+perfil segun la aplicacion en primer plano**.
 
-La memoria del mouse **no es legible** (`GET_REPORT` devuelve STALL), asi que el estado
-(perfil activo, stage de DPI) se guarda en disco y se re-aplica al arrancar.
+La memoria del mouse **no es legible** (`GET_REPORT` devuelve STALL) y no tiene ranuras de
+perfil: el estado (perfil activo, stage de DPI) se guarda en disco y se re-aplica al
+arrancar. Los perfiles viven en el PC.
 
 ```
 app/                 daemon, tray, UI, entrypoint
@@ -35,14 +37,61 @@ python -m app --dry-run        # no escribe en el mouse ni inyecta teclas
 python -m app --no-host        # solo perfiles onboard, sin capturar botones
 python -m app --profile FPS    # perfil inicial
 python -m app --no-hotkeys     # sin Ctrl+Alt+1..9
+python -m app --no-auto-apps   # sin cambio automatico por aplicacion
+python -m app --auto-settle 1.2  # segundos con la misma app delante (0.8 por defecto)
 python -m app --swap-side-buttons   # si atras/adelante estan invertidos
 ```
 
 Configuracion: `%LOCALAPPDATA%\x6-manager` (Windows) o `~/.config/x6-manager` (Linux),
-con `profiles/*.json` y `state.json` (ultimo perfil activo).
+con `profiles/*.json` y `state.json` (ultimo perfil activo y flag global de auto-cambio).
 
-Crea perfiles copiando un JSON de `examples/` a `profiles/`. Se validan al cargar: DPI
-50-26000 multiplo de 50, maximo 8 stages, colores `0xRRGGBB`, etc.
+Crea perfiles copiando un JSON de `examples/` a `profiles/` o desde la UI. Se validan al
+cargar: DPI 50-26000 multiplo de 50, maximo 8 stages, colores `0xRRGGBB`, etc.
+
+## UI (`python -m app --ui`)
+
+La ventana tiene la lista de perfiles a la izquierda y cuatro pestanas: **DPI y sensor**,
+**Botones**, **G-Shift** y **Auto por app**.
+
+- **Seleccionar un perfil solo carga el editor**: no escribe en el mouse ni cambia el
+  perfil activo. Asi no se reconfigura el raton sin querer.
+- **Guardar** valida y escribe el JSON del perfil.
+- **Aplicar al mouse** guarda y manda DPI + polling (`0x04` y `0x06`), y deja ese perfil
+  como activo. Es la unica accion de la UI que toca el hardware.
+- **Botones y capas** se editan como texto: `click:left`, `shortcut:ctrl+c`, `hold:shift`,
+  `media:mute`, `macro:spray`, `dpi_cycle`, `dpi_up`, `dpi_down`, `off`. Vacio = el boton
+  pasa sin tocar.
+- El boton DPI de detras de la rueda no manda release: para usarlo como disparador de
+  capa hay que elegir modo **toggle**.
+- Al cambiar de perfil con cambios sin guardar, la UI pregunta. `Borrar` no permite
+  borrar el perfil activo.
+
+Solo DPI y polling viajan al raton; botones, capas, macros y reglas de auto-cambio los
+ejecuta el daemon en el PC.
+
+## Cambio automatico por aplicacion
+
+Cada perfil declara que aplicaciones lo activan:
+
+```json
+"auto_apps": ["cs2.exe", "valorant*", "title:*YouTube*"]
+```
+
+- Sin prefijo se compara con el **ejecutable** (con o sin extension: `notepad` vale para
+  `notepad.exe`). `title:patron` compara con el **titulo de la ventana**.
+- `*` y `?` funcionan como comodines; no distingue mayusculas.
+- Gana el primer perfil por orden alfabetico cuyas reglas coincidan.
+- El cambio espera `--auto-settle` segundos con la misma app delante, para no reescribir
+  el mouse al hacer alt-tab.
+- Cuando ninguna regla coincide se vuelve al **perfil base**: el que estaba activo al
+  arrancar el daemon.
+- El interruptor global esta en la bandeja (**Cambio por app**) y en la pestana Auto;
+  se guarda en `state.json` y `--no-auto-apps` lo desactiva al arrancar.
+
+Verificado en hardware con ventanas reales: REAPER y el Bloc de notas dispararon el
+cambio al perfil de prueba (eventos `switch` en el log) y el perfil base se re-aplico al
+retirar la regla (equivale a cerrar la app). El cambio de foco por script lo bloquea
+Windows, asi que la vuelta se probo por esa via y en los tests con ventanas simuladas.
 
 ## Protocolo (medido y capturado en hardware real)
 
@@ -283,10 +332,12 @@ Acciones disponibles (`kind`): `click` (left/right/middle/forward/backward), `sh
 python -m unittest discover -s tests -v
 ```
 
-81 tests sin hardware: layout del payload 0x04, checksum, round-trip DPI, parseo de
+121 tests sin hardware: layout del payload 0x04, checksum, round-trip DPI, parseo de
 `0x03`, validacion/persistencia de perfiles (incluye migracion del formato viejo),
-maquina de estados de capas (hold, toggle, release diferido, reset) y disparadores de
-teclado del rango `0x00-0x2F`.
+maquina de estados de capas (hold, toggle, release diferido, reset), disparadores de
+teclado del rango `0x00-0x2F`, reglas de auto-cambio (ejecutable, titulo, comodines,
+settle, vuelta a base) y la UI Qt en modo `offscreen` (carga, guardado, validacion de
+acciones y capas).
 
 Verificacion con hardware real (herramientas en `tools/`):
 
@@ -306,5 +357,7 @@ python tools/mute_state.py --seconds 60      # prueba objetiva de media:mute
 - `0x06` (checksum del polling: el corto usa complemento a uno y no coincide con el
   aditivo del 0x04), `0x05` (sleep).
 - LOD/debounce/angle-snap/motion-sync: hoy solo se guardan, no se envian.
-- Auto-switch por app (`auto_apps`), autostart en Windows, backend `evdev` para Linux.
+- Autostart en Windows, backend `evdev` para Linux.
 - Iconos por estado y modo single-instance.
+- Macro onboarding desde la UI: por ahora los macros se definen en el JSON o con
+  `tools/write_config.py --macro-slot`. Editar pasos en la ventana queda pendiente.

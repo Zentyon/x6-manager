@@ -13,6 +13,7 @@ from pathlib import Path
 
 from x6core import transport
 from x6core.profiles import Profile, ProfileError, profiles_dir, state_path
+from x6core.protocol import build_polling_report
 
 log = logging.getLogger(__name__)
 
@@ -24,9 +25,12 @@ class Daemon:
         self.profiles: dict[str, Profile] = {}
         self.active = ""
         self.dry_run = dry_run
+        self.auto_apps_enabled = True
         self._dongle: transport.Dongle | None = None
         self._lock = threading.RLock()
         self._listeners: list = []
+        state = self._load_state_data()
+        self.auto_apps_enabled = bool(state.get("auto_apps", True))
         self.reload()
 
     # -- perfiles ----------------------------------------------------------
@@ -87,11 +91,17 @@ class Daemon:
         if self.dry_run:
             log.info("[dry-run] aplicaria %d bytes a %s", len(payload), profile.name)
             return True
-        acked = self.ensure_open().apply_onboard(payload)
+        dongle = self.ensure_open()
+        acked = dongle.apply_onboard(payload)
         log.debug("payload 0x04 aplicado (%s)", "con ACK" if acked else "sin ACK")
+        # El polling tambien es onboard: se manda aparte porque va en otro report.
+        try:
+            dongle.apply_config([build_polling_report(profile.polling)], wait_ack=False)
+        except Exception:
+            log.exception("no se pudo aplicar el polling (%s Hz)", profile.polling)
         return acked
 
-    def switch(self, name: str) -> bool:
+    def switch(self, name: str, *, source: str = "user") -> bool:
         with self._lock:
             profile = self.profiles.get(name)
             if profile is None:
@@ -100,7 +110,7 @@ class Daemon:
             self.active = name
             self._save_state()
         log.info("perfil activo: %s dpi=%s %dHz", name, profile.dpi_stages, profile.polling)
-        self._emit("switch", name=name)
+        self._emit("switch", name=name, source=source)
         return True
 
     def cycle(self, delta: int = +1) -> bool:
@@ -142,6 +152,13 @@ class Daemon:
                 self._on_status(status)
             except TimeoutError as exc:
                 log.warning("monitor: %s", exc)
+                self._drop_dongle()
+                stop.wait(backoff)
+                backoff = min(backoff * 2, 30)
+            except OSError as exc:
+                # El raton inalambrico corta la lectura al dormirse: no es un fallo
+                # del programa, solo hay que reabrir el handle y reintentar.
+                log.warning("monitor: lectura interrumpida (%s), reintentando", exc)
                 self._drop_dongle()
                 stop.wait(backoff)
                 backoff = min(backoff * 2, 30)
@@ -205,20 +222,33 @@ class Daemon:
                 log.exception("listener %r fallo en %s", callback, event)
 
     # -- estado ------------------------------------------------------------
-    def _load_state(self) -> str:
+    def _load_state_data(self) -> dict:
         try:
             data = json.loads(Path(state_path()).read_text(encoding="utf-8"))
-            return str(data.get("active") or "")
+            return data if isinstance(data, dict) else {}
         except FileNotFoundError:
-            return ""
+            return {}
         except Exception:
             log.warning("state.json ilegible", exc_info=True)
-            return ""
+            return {}
+
+    def _load_state(self) -> str:
+        return str(self._load_state_data().get("active") or "")
+
+    def set_auto_apps(self, enabled: bool) -> None:
+        with self._lock:
+            self.auto_apps_enabled = bool(enabled)
+            self._save_state()
+        log.info("cambio por app: %s", "activado" if enabled else "desactivado")
+        self._emit("auto_apps", enabled=self.auto_apps_enabled)
 
     def _save_state(self) -> None:
         try:
-            Path(state_path()).write_text(json.dumps({"active": self.active}, indent=2) + "\n",
-                                          encoding="utf-8")
+            Path(state_path()).write_text(
+                json.dumps({"active": self.active,
+                            "auto_apps": self.auto_apps_enabled}, indent=2) + "\n",
+                encoding="utf-8",
+            )
         except Exception:
             log.warning("no se pudo guardar state.json", exc_info=True)
 

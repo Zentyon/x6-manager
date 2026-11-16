@@ -71,11 +71,16 @@ class TrayApp:
             MenuItem("Siguiente perfil", lambda *_: self._run(self.daemon.cycle, +1)),
             MenuItem("Subir DPI", lambda *_: self._run(self.daemon.cycle_stage, +1)),
             MenuItem("Bajar DPI", lambda *_: self._run(self.daemon.cycle_stage, -1)),
+            MenuItem("Cambio por app", self._toggle_auto,
+                     checked=lambda _item: self.daemon.auto_apps_enabled),
             Menu.SEPARATOR,
             MenuItem("Recargar perfiles", lambda *_: self._run(self.daemon.reload)),
             MenuItem("Salir", self._quit),
         ]
         return items
+
+    def _toggle_auto(self, *_args) -> None:
+        self._run(self.daemon.set_auto_apps, not self.daemon.auto_apps_enabled)
 
     def _switcher(self, name: str):
         def _item(*_args):

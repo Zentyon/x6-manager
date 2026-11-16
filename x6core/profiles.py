@@ -145,6 +145,11 @@ class Profile:
             for i, step in enumerate(steps):
                 if not isinstance(step, dict) or "key" not in step:
                     raise ProfileError(f"macro {macro_id}[{i}]: falta 'key'")
+        if not isinstance(self.auto_apps, list):
+            raise ProfileError("auto_apps debe ser una lista de patrones")
+        for i, pattern in enumerate(self.auto_apps):
+            if not isinstance(pattern, str) or not pattern.strip():
+                raise ProfileError(f"auto_apps[{i}]={pattern!r}: patron vacio")
 
     # -- protocolo ---------------------------------------------------------
     def onboard_payload(self) -> bytes:
@@ -177,23 +182,29 @@ class Profile:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ProfileError(f"{path.name}: JSON invalido ({exc})") from exc
+        return cls.from_dict(data, where=path.name)
+
+    @classmethod
+    def from_dict(cls, data: dict, where: str = "perfil") -> "Profile":
+        """Construye y valida un perfil desde el JSON (sin tocar el disco)."""
         if not isinstance(data, dict):
-            raise ProfileError(f"{path.name}: se esperaba un objeto JSON")
+            raise ProfileError(f"{where}: se esperaba un objeto JSON")
 
         known = {f.name for f in fields(cls)}
         unknown = set(data) - known
         if unknown:
             raise ProfileError(
-                f"{path.name}: claves desconocidas {sorted(unknown)} (validas {sorted(known)})"
+                f"{where}: claves desconocidas {sorted(unknown)} (validas {sorted(known)})"
             )
+        data = dict(data)
         data.pop("version", None)
         data["buttons"] = {
-            k: _as_action(v, f"{path.name}: buttons[{k}]")
+            k: _as_action(v, f"{where}: buttons[{k}]")
             for k, v in (data.get("buttons") or {}).items()
         }
         data["layers"] = {
             layer: {
-                k: _as_action(v, f"{path.name}: layers[{layer}][{k}]")
+                k: _as_action(v, f"{where}: layers[{layer}][{k}]")
                 for k, v in (buttons or {}).items()
             }
             for layer, buttons in (data.get("layers") or {}).items()
@@ -201,9 +212,40 @@ class Profile:
         try:
             profile = cls(**data)
         except TypeError as exc:
-            raise ProfileError(f"{path.name}: {exc}") from exc
+            raise ProfileError(f"{where}: {exc}") from exc
         profile.validate()
         return profile
+
+
+def action_to_text(action: ButtonAction) -> str:
+    """Formato compacto para la UI: `click:left`, `media:mute`, `dpi_cycle`."""
+    if action.kind == "macro":
+        return f"macro:{action.macro_id or action.value}"
+    if action.value:
+        return f"{action.kind}:{action.value}"
+    return action.kind
+
+
+def action_from_text(text: str) -> ButtonAction:
+    """Inversa de `action_to_text`; valida la accion antes de devolverla."""
+    raw = text.strip()
+    if not raw:
+        raise ProfileError("accion vacia")
+    if ":" in raw:
+        kind, value = (part.strip() for part in raw.split(":", 1))
+    else:
+        kind, value = raw, ""
+    kind = kind.lower()
+    if kind == "macro":
+        action = ButtonAction("macro", "", value)
+    elif kind == "media":
+        action = ButtonAction("media", value.lower())
+    elif kind == "click":
+        action = ButtonAction("click", value or "left")
+    else:
+        action = ButtonAction(kind, value)
+    action.validate(f"accion {text!r}")
+    return action
 
 
 def _as_action(raw: object, where: str) -> ButtonAction:
